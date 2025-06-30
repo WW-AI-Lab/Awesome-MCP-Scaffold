@@ -22,7 +22,7 @@
 ## ✨ 核心优势
 
 ### 🔥 专为 Cursor 优化
-- **智能规则系统**：内置用户Rules `Cursor_User_Rules.md`和 3 套项目 `.cursor/rules` 配置
+- **智能规则系统**：内置用户Rules [Cursor_User_Rules.md](docs/Cursor_User_Rules.md)和 3 套项目 `.cursor/rules` 配置
 - **AI 代码生成**：一句话自动生成 Tools、Resources、Prompts，并自动生成测试用例
 - **上下文感知**：AI 助手理解 MCP 开发模式
 - **错误自动修复**：智能识别并修复常见问题
@@ -70,17 +70,22 @@ python run.py --transport streamable-http --port 8000
 fastmcp dev run.py
 ```
 
-### 3. 验证服务器
+### 3. 验证MCP服务器
 
 ```bash
-# 健康检查
-curl http://localhost:8000/health
+# MCP协议测试 - 获取工具列表
+echo '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | python run.py
 
-# 查看服务器信息
-curl http://localhost:8000/info
+# MCP协议测试 - 获取资源列表  
+echo '{"jsonrpc":"2.0","id":2,"method":"resources/list"}' | python run.py
 
-# 测试工具列表
-curl http://localhost:8000/api/tools
+# MCP协议测试 - 调用计算器工具
+echo '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"calculator","arguments":{"expression":"2+3*4"}}}' | python run.py
+
+# HTTP模式下的MCP端点测试
+curl -X POST http://localhost:8000/mcp \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
 ```
 
 ### 4. 在 Cursor 中开发
@@ -180,21 +185,11 @@ docker run -d \
   my-mcp-server
 ```
 
-### 性能基准 (经过验证)
-
-| 部署方式 | QPS | 延迟(P99) | 内存使用 | 适用场景 |
-|----------|-----|-----------|----------|----------|
-| 开发模式 | 1,000 | 50ms | 100MB | 本地开发 |
-| 生产模式 | 3,500+ | 30ms | 300MB | 生产环境 |
-| 负载均衡 | 10,000+ | 25ms | 1GB | 高并发 |
-
 ### Docker Compose 完整栈
 
 ```bash
 # 启动完整服务栈
 docker-compose up -d
-
-# 包含：MCP 服务器 + Nginx + Prometheus + Grafana
 ```
 
 ## 📊 内置示例功能
@@ -212,11 +207,15 @@ docker-compose up -d
 - **代码审查**：质量分析、Bug检测、性能优化
 - **数据分析**：统计分析、预测建模、质量评估
 
-### 🌐 REST API
+### 🌐 MCP协议端点
+- **主要端点**: `/mcp` - MCP协议通信端点
+- **传输协议**: Streamable HTTP (推荐) / stdio
+- **协议格式**: JSON-RPC 2.0
+
+### 🔧 可选REST API (便于第三方集成)
 - `/health` - 健康检查
-- `/info` - 服务器信息
-- `/api/tools` - 工具列表
-- `/api/resources` - 资源列表
+- `/info` - 服务器信息  
+- `/api/tools` - 工具列表 (非MCP协议)
 
 ## 🧪 验证和测试
 
@@ -232,17 +231,22 @@ make lint
 make coverage
 ```
 
-### 手动验证步骤
+### MCP协议验证步骤
 ```bash
-# 1. 功能测试
-curl http://localhost:8000/health
-curl http://localhost:8000/api/tools
-
-# 2. MCP 协议测试
+# 1. MCP核心功能测试
 echo '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | python run.py
+echo '{"jsonrpc":"2.0","id":2,"method":"resources/list"}' | python run.py
 
-# 3. 性能测试
-ab -n 1000 -c 10 http://localhost:8000/health
+# 2. MCP工具调用测试
+echo '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"calculator","arguments":{"expression":"10*5+2"}}}' | python run.py
+
+# 3. HTTP模式MCP测试
+curl -X POST http://localhost:8000/mcp \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+
+# 4. 可选的健康检查 (非MCP协议)
+curl http://localhost:8000/health
 ```
 
 ## 📚 学习资源

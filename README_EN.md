@@ -70,17 +70,22 @@ python run.py --transport streamable-http --port 8000
 fastmcp dev run.py
 ```
 
-### 3. Verify Server
+### 3. Verify MCP Server
 
 ```bash
-# Health check
-curl http://localhost:8000/health
+# MCP Protocol Test - Get tools list
+echo '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | python run.py
 
-# View server information
-curl http://localhost:8000/info
+# MCP Protocol Test - Get resources list
+echo '{"jsonrpc":"2.0","id":2,"method":"resources/list"}' | python run.py
 
-# Test tools list
-curl http://localhost:8000/api/tools
+# MCP Protocol Test - Call calculator tool
+echo '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"calculator","arguments":{"expression":"2+3*4"}}}' | python run.py
+
+# MCP endpoint test in HTTP mode
+curl -X POST http://localhost:8000/mcp \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
 ```
 
 ### 4. Develop in Cursor
@@ -212,11 +217,15 @@ docker-compose up -d
 - **Code review**: Quality analysis, bug detection, performance optimization
 - **Data analysis**: Statistical analysis, predictive modeling, quality assessment
 
-### 🌐 REST API
+### 🌐 MCP Protocol Endpoints
+- **Main Endpoint**: `/mcp` - MCP protocol communication endpoint
+- **Transport Protocol**: Streamable HTTP (recommended) / stdio
+- **Protocol Format**: JSON-RPC 2.0
+
+### 🔧 Optional REST API (for third-party integration)
 - `/health` - Health check
 - `/info` - Server information
-- `/api/tools` - Tools list
-- `/api/resources` - Resources list
+- `/api/tools` - Tools list (non-MCP protocol)
 
 ## 🧪 Verification and Testing
 
@@ -232,17 +241,22 @@ make lint
 make coverage
 ```
 
-### Manual Verification Steps
+### MCP Protocol Verification Steps
 ```bash
-# 1. Functional testing
-curl http://localhost:8000/health
-curl http://localhost:8000/api/tools
-
-# 2. MCP protocol testing
+# 1. MCP core functionality test
 echo '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | python run.py
+echo '{"jsonrpc":"2.0","id":2,"method":"resources/list"}' | python run.py
 
-# 3. Performance testing
-ab -n 1000 -c 10 http://localhost:8000/health
+# 2. MCP tool invocation test
+echo '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"calculator","arguments":{"expression":"10*5+2"}}}' | python run.py
+
+# 3. HTTP mode MCP test
+curl -X POST http://localhost:8000/mcp \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+
+# 4. Optional health check (non-MCP protocol)
+curl http://localhost:8000/health
 ```
 
 ## 📚 Learning Resources
