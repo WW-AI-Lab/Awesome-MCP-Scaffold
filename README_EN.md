@@ -2,6 +2,8 @@
 
 > **Production-Grade MCP Server Development Scaffold - Fast Development Solution Optimized for Cursor IDE**
 
+English | [中文](README.md)
+
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.10+-blue.svg)](https://python.org)
 [![MCP](https://img.shields.io/badge/MCP-v1.10.1-green.svg)](https://modelcontextprotocol.io)

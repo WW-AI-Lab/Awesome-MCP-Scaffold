@@ -2,6 +2,8 @@
 
 > **生产级 MCP 服务器开发脚手架 - 专为 Cursor IDE 优化的快速开发解决方案**
 
+[English](README_EN.md) | 中文
+
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.10+-blue.svg)](https://python.org)
 [![MCP](https://img.shields.io/badge/MCP-v1.10.1-green.svg)](https://modelcontextprotocol.io)
