@@ -1,0 +1,644 @@
+---
+description: MCP 服务器测试模式与调试指南：单元测试模式、工具 (Tools) 测试、资源 (Resources) 测试；MCP 协议测试、HTTP 端点测试、
+globs: 
+alwaysApply: false
+---
+# MCP 服务器测试模式与调试指南
+
+## 测试策略概览
+基于 MCP 协议的特殊性，需要采用多层次的测试策略来确保服务器的可靠性和性能。
+
+## 单元测试模式
+
+### 1. 工具 (Tools) 测试
+```python
+import pytest
+from unittest.mock import AsyncMock, patch
+from server.tools.example_tool import example_tool
+
+@pytest.mark.asyncio
+async def test_example_tool_success():
+    """测试工具正常执行"""
+    result = await example_tool("test_input")
+    assert result == "expected_output"
+
+@pytest.mark.asyncio
+async def test_example_tool_validation():
+    """测试输入验证"""
+    with pytest.raises(ValueError, match="Invalid input"):
+        await example_tool("")
+
+@pytest.mark.asyncio
+async def test_example_tool_with_mock():
+    """测试带外部依赖的工具"""
+    with patch('server.tools.example_tool.external_api_call') as mock_api:
+        mock_api.return_value = {"status": "success"}
+        
+        result = await example_tool("test_input")
+        
+        mock_api.assert_called_once_with("test_input")
+        assert result["status"] == "success"
+
+@pytest.mark.asyncio
+async def test_example_tool_error_handling():
+    """测试错误处理"""
+    with patch('server.tools.example_tool.external_api_call') as mock_api:
+        mock_api.side_effect = ConnectionError("Network error")
+        
+        with pytest.raises(RuntimeError, match="Tool execution failed"):
+            await example_tool("test_input")
+```
+
+### 2. 资源 (Resources) 测试
+```python
+import pytest
+from server.resources.example_resource import get_resource_data
+
+@pytest.mark.asyncio
+async def test_resource_retrieval():
+    """测试资源获取"""
+    resource_id = "test_resource_123"
+    data = await get_resource_data(resource_id)
+    
+    assert data is not None
+    assert "content" in data
+    assert data["id"] == resource_id
+
+@pytest.mark.asyncio
+async def test_resource_not_found():
+    """测试资源不存在的情况"""
+    with pytest.raises(FileNotFoundError):
+        await get_resource_data("nonexistent_resource")
+
+@pytest.mark.asyncio
+async def test_resource_caching():
+    """测试资源缓存机制"""
+    resource_id = "cached_resource"
+    
+    # 第一次调用
+    start_time = time.time()
+    data1 = await get_resource_data(resource_id)
+    first_call_time = time.time() - start_time
+    
+    # 第二次调用（应该使用缓存）
+    start_time = time.time()
+    data2 = await get_resource_data(resource_id)
+    second_call_time = time.time() - start_time
+    
+    assert data1 == data2
+    assert second_call_time < first_call_time  # 缓存应该更快
+```
+
+### 3. 提示 (Prompts) 测试
+```python
+import pytest
+from server.prompts.example_prompt import generate_prompt
+
+def test_prompt_generation():
+    """测试提示生成"""
+    context = {"user": "John", "task": "summarize"}
+    prompt = generate_prompt(context)
+    
+    assert "John" in prompt
+    assert "summarize" in prompt
+    assert len(prompt) > 0
+
+def test_prompt_template_validation():
+    """测试提示模板验证"""
+    invalid_context = {}
+    
+    with pytest.raises(KeyError):
+        generate_prompt(invalid_context)
+
+def test_prompt_length_limits():
+    """测试提示长度限制"""
+    large_context = {"content": "x" * 10000}
+    prompt = generate_prompt(large_context)
+    
+    # 确保提示不会过长
+    assert len(prompt) < 8000
+```
+
+## 集成测试模式
+
+### 1. MCP 协议测试
+```python
+import pytest
+import httpx
+from mcp.client.session import ClientSession
+from mcp.client.streamable_http import streamablehttp_client
+
+@pytest.mark.asyncio
+async def test_mcp_server_initialization():
+    """测试 MCP 服务器初始化"""
+    async with streamablehttp_client("http://localhost:8000/mcp") as (read, write, _):
+        async with ClientSession(read, write) as session:
+            # 测试初始化
+            await session.initialize()
+            
+            # 验证服务器信息
+            assert session.server_info.name == "TestServer"
+            assert session.server_info.version is not None
+
+@pytest.mark.asyncio
+async def test_list_tools():
+    """测试工具列表获取"""
+    async with streamablehttp_client("http://localhost:8000/mcp") as (read, write, _):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            
+            tools = await session.list_tools()
+            
+            assert len(tools.tools) > 0
+            tool_names = [tool.name for tool in tools.tools]
+            assert "example_tool" in tool_names
+
+@pytest.mark.asyncio
+async def test_call_tool():
+    """测试工具调用"""
+    async with streamablehttp_client("http://localhost:8000/mcp") as (read, write, _):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            
+            result = await session.call_tool(
+                "example_tool", 
+                {"param": "test_value"}
+            )
+            
+            assert result is not None
+            assert len(result) > 0
+
+@pytest.mark.asyncio
+async def test_read_resource():
+    """测试资源读取"""
+    async with streamablehttp_client("http://localhost:8000/mcp") as (read, write, _):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            
+            resources = await session.list_resources()
+            if resources.resources:
+                resource_uri = resources.resources[0].uri
+                content = await session.read_resource(resource_uri)
+                
+                assert content is not None
+                assert len(content) > 0
+```
+
+### 2. HTTP 端点测试
+```python
+import pytest
+import httpx
+
+@pytest.mark.asyncio
+async def test_health_endpoint():
+    """测试健康检查端点"""
+    async with httpx.AsyncClient() as client:
+        response = await client.get("http://localhost:8000/health")
+        
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "healthy"
+
+@pytest.mark.asyncio
+async def test_mcp_endpoint_authentication():
+    """测试 MCP 端点认证"""
+    async with httpx.AsyncClient() as client:
+        # 无认证请求
+        response = await client.post("http://localhost:8000/mcp")
+        assert response.status_code == 401
+        
+        # 有效认证请求
+        headers = {"Authorization": "Bearer valid_token"}
+        response = await client.post(
+            "http://localhost:8000/mcp",
+            headers=headers,
+            json={"jsonrpc": "2.0", "method": "initialize", "id": 1}
+        )
+        assert response.status_code == 200
+
+@pytest.mark.asyncio
+async def test_cors_headers():
+    """测试 CORS 头设置"""
+    async with httpx.AsyncClient() as client:
+        response = await client.options(
+            "http://localhost:8000/mcp",
+            headers={"Origin": "https://allowed-domain.com"}
+        )
+        
+        assert response.status_code == 200
+        assert "Access-Control-Allow-Origin" in response.headers
+```
+
+## 性能测试模式
+
+### 1. 负载测试
+```python
+import pytest
+import asyncio
+import time
+from concurrent.futures import ThreadPoolExecutor
+
+@pytest.mark.asyncio
+async def test_concurrent_tool_calls():
+    """测试并发工具调用"""
+    async def call_tool():
+        async with streamablehttp_client("http://localhost:8000/mcp") as (read, write, _):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                return await session.call_tool("example_tool", {"param": "test"})
+    
+    # 并发执行多个工具调用
+    start_time = time.time()
+    tasks = [call_tool() for _ in range(10)]
+    results = await asyncio.gather(*tasks)
+    end_time = time.time()
+    
+    # 验证所有调用都成功
+    assert len(results) == 10
+    assert all(result is not None for result in results)
+    
+    # 验证性能
+    total_time = end_time - start_time
+    assert total_time < 5.0  # 10个并发调用应该在5秒内完成
+
+@pytest.mark.asyncio
+async def test_memory_usage():
+    """测试内存使用情况"""
+    import psutil
+    import os
+    
+    process = psutil.Process(os.getpid())
+    initial_memory = process.memory_info().rss
+    
+    # 执行大量操作
+    async with streamablehttp_client("http://localhost:8000/mcp") as (read, write, _):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            
+            for i in range(100):
+                await session.call_tool("example_tool", {"param": f"test_{i}"})
+    
+    final_memory = process.memory_info().rss
+    memory_increase = final_memory - initial_memory
+    
+    # 验证内存增长在合理范围内（例如小于100MB）
+    assert memory_increase < 100 * 1024 * 1024
+
+@pytest.mark.asyncio
+async def test_response_time():
+    """测试响应时间"""
+    response_times = []
+    
+    for _ in range(20):
+        start_time = time.time()
+        
+        async with streamablehttp_client("http://localhost:8000/mcp") as (read, write, _):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                await session.call_tool("example_tool", {"param": "test"})
+        
+        end_time = time.time()
+        response_times.append(end_time - start_time)
+    
+    # 验证平均响应时间
+    avg_response_time = sum(response_times) / len(response_times)
+    assert avg_response_time < 1.0  # 平均响应时间应该小于1秒
+    
+    # 验证99%的请求响应时间
+    response_times.sort()
+    p99_response_time = response_times[int(len(response_times) * 0.99)]
+    assert p99_response_time < 2.0  # 99%的请求应该在2秒内完成
+```
+
+## 测试工具和 Fixtures
+
+### 1. pytest fixtures
+```python
+import pytest
+import asyncio
+from fastapi.testclient import TestClient
+from server.main import app
+
+@pytest.fixture(scope="session")
+def event_loop():
+    """创建事件循环"""
+    loop = asyncio.get_event_loop_policy().new_event_loop()
+    yield loop
+    loop.close()
+
+@pytest.fixture
+def test_client():
+    """创建测试客户端"""
+    return TestClient(app)
+
+@pytest.fixture
+async def mcp_session():
+    """创建 MCP 会话"""
+    async with streamablehttp_client("http://localhost:8000/mcp") as (read, write, _):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            yield session
+
+@pytest.fixture
+def mock_database():
+    """模拟数据库"""
+    from unittest.mock import Mock
+    db = Mock()
+    db.query.return_value = {"id": 1, "data": "test"}
+    return db
+
+@pytest.fixture(autouse=True)
+def setup_test_environment(monkeypatch):
+    """设置测试环境变量"""
+    monkeypatch.setenv("MCP_LOG_LEVEL", "DEBUG")
+    monkeypatch.setenv("MCP_API_TOKEN", "test_token")
+    monkeypatch.setenv("MCP_REDIS_ENABLED", "false")
+```
+
+### 2. 测试数据生成
+```python
+import pytest
+from faker import Faker
+
+fake = Faker()
+
+@pytest.fixture
+def sample_tool_input():
+    """生成示例工具输入"""
+    return {
+        "text": fake.text(max_nb_chars=200),
+        "number": fake.random_int(min=1, max=100),
+        "email": fake.email(),
+        "url": fake.url()
+    }
+
+@pytest.fixture
+def sample_resource_data():
+    """生成示例资源数据"""
+    return {
+        "id": fake.uuid4(),
+        "title": fake.sentence(),
+        "content": fake.text(max_nb_chars=1000),
+        "created_at": fake.date_time().isoformat(),
+        "tags": [fake.word() for _ in range(3)]
+    }
+```
+
+## 调试技巧和工具
+
+### 1. 日志调试
+```python
+import structlog
+import logging
+
+# 配置详细日志
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+
+logger = structlog.get_logger()
+
+@mcp.tool()
+async def debug_tool(param: str) -> str:
+    """带调试信息的工具"""
+    logger.debug("tool_started", tool="debug_tool", param=param)
+    
+    try:
+        # 模拟处理
+        result = await process_param(param)
+        logger.info("tool_completed", tool="debug_tool", result=result)
+        return result
+    except Exception as e:
+        logger.error("tool_failed", tool="debug_tool", error=str(e), exc_info=True)
+        raise
+```
+
+### 2. MCP Inspector 使用
+```bash
+# 安装 MCP Inspector
+pip install mcp-inspector
+
+# 启动调试会话
+mcp-inspector --server-command "python server.py"
+
+# 或连接到运行中的服务器
+mcp-inspector --server-url "http://localhost:8000/mcp"
+```
+
+### 3. 网络流量分析
+```python
+import httpx
+import logging
+
+# 启用 HTTP 请求日志
+logging.getLogger("httpx").setLevel(logging.DEBUG)
+logging.getLogger("httpcore").setLevel(logging.DEBUG)
+
+# 使用代理进行流量分析
+async def debug_mcp_client():
+    """调试 MCP 客户端请求"""
+    proxies = {"http://": "http://localhost:8080"}  # 使用 Charles 或 mitmproxy
+    
+    async with httpx.AsyncClient(proxies=proxies) as client:
+        response = await client.post(
+            "http://localhost:8000/mcp",
+            json={"jsonrpc": "2.0", "method": "tools/list", "id": 1}
+        )
+        print(f"Response: {response.status_code} - {response.text}")
+```
+
+### 4. 性能分析
+```python
+import cProfile
+import pstats
+from functools import wraps
+
+def profile_tool(func):
+    """装饰器：分析工具性能"""
+    @wraps(func)
+    async def wrapper(*args, **kwargs):
+        profiler = cProfile.Profile()
+        profiler.enable()
+        
+        try:
+            result = await func(*args, **kwargs)
+            return result
+        finally:
+            profiler.disable()
+            
+            # 保存性能分析结果
+            stats = pstats.Stats(profiler)
+            stats.sort_stats('cumulative')
+            stats.dump_stats(f"{func.__name__}_profile.stats")
+            
+            # 打印前10个最耗时的函数
+            stats.print_stats(10)
+    
+    return wrapper
+
+@mcp.tool()
+@profile_tool
+async def performance_critical_tool(param: str) -> str:
+    """需要性能分析的工具"""
+    return await expensive_operation(param)
+```
+
+## 测试配置和环境
+
+### 1. pytest 配置 (pytest.ini)
+```ini
+[tool:pytest]
+testpaths = tests
+python_files = test_*.py
+python_classes = Test*
+python_functions = test_*
+addopts = 
+    --verbose
+    --tb=short
+    --strict-markers
+    --disable-warnings
+    --cov=server
+    --cov-report=html
+    --cov-report=term-missing
+    --cov-fail-under=80
+asyncio_mode = auto
+markers =
+    unit: Unit tests
+    integration: Integration tests
+    performance: Performance tests
+    slow: Slow tests (not run by default)
+```
+
+### 2. 测试环境配置
+```python
+# conftest.py
+import pytest
+import os
+import tempfile
+from pathlib import Path
+
+@pytest.fixture(scope="session", autouse=True)
+def setup_test_environment():
+    """设置测试环境"""
+    # 创建临时目录
+    test_dir = tempfile.mkdtemp()
+    os.environ["TEST_DATA_DIR"] = test_dir
+    
+    # 设置测试配置
+    os.environ["MCP_ENVIRONMENT"] = "test"
+    os.environ["MCP_LOG_LEVEL"] = "DEBUG"
+    os.environ["MCP_API_TOKEN"] = "test_token_123"
+    
+    yield
+    
+    # 清理
+    import shutil
+    shutil.rmtree(test_dir, ignore_errors=True)
+
+@pytest.fixture
+def temp_file():
+    """创建临时文件"""
+    with tempfile.NamedTemporaryFile(mode='w', delete=False) as f:
+        f.write("test content")
+        temp_path = f.name
+    
+    yield temp_path
+    
+    # 清理
+    os.unlink(temp_path)
+```
+
+### 3. CI/CD 测试配置
+```yaml
+# .github/workflows/test.yml
+name: Test MCP Server
+
+on: [push, pull_request]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: [3.10, 3.11, 3.12]
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v3
+      with:
+        python-version: ${{ matrix.python-version }}
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements-test.txt
+    
+    - name: Run unit tests
+      run: pytest tests/unit/ -v
+    
+    - name: Run integration tests
+      run: pytest tests/integration/ -v
+    
+    - name: Run performance tests
+      run: pytest tests/performance/ -v -m "not slow"
+    
+    - name: Upload coverage reports
+      uses: codecov/codecov-action@v3
+```
+
+## 常见测试问题和解决方案
+
+### 1. 异步测试问题
+```python
+# ❌ 错误：没有正确处理异步
+def test_async_tool():
+    result = example_async_tool("param")  # 这会返回 coroutine 对象
+    assert result == "expected"
+
+# ✅ 正确：使用 pytest.mark.asyncio
+@pytest.mark.asyncio
+async def test_async_tool():
+    result = await example_async_tool("param")
+    assert result == "expected"
+```
+
+### 2. 测试隔离问题
+```python
+# ❌ 错误：测试之间共享状态
+global_cache = {}
+
+@mcp.tool()
+def cached_tool(param: str) -> str:
+    if param in global_cache:
+        return global_cache[param]
+    result = expensive_operation(param)
+    global_cache[param] = result
+    return result
+
+# ✅ 正确：每个测试清理状态
+@pytest.fixture(autouse=True)
+def clear_cache():
+    global_cache.clear()
+    yield
+    global_cache.clear()
+```
+
+### 3. 外部依赖模拟
+```python
+# ✅ 正确：模拟外部API调用
+@pytest.mark.asyncio
+async def test_tool_with_external_api():
+    with patch('httpx.AsyncClient.post') as mock_post:
+        mock_post.return_value.json.return_value = {"result": "success"}
+        mock_post.return_value.status_code = 200
+        
+        result = await api_dependent_tool("test_param")
+        
+        assert result["status"] == "success"
+        mock_post.assert_called_once()
+```
+
+这套测试指南确保您的 MCP 服务器在各种场景下都能可靠运行，同时提供有效的调试手段来快速定位和解决问题。

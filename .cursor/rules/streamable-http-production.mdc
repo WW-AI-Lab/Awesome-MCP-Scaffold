@@ -1,0 +1,517 @@
+---
+description: Streamable HTTP 开发部署指南：基础 Streamable HTTP 设置、安全配置、容器化部署等
+globs: 
+alwaysApply: false
+---
+# Streamable HTTP 生产环境部署指南
+
+## 概述
+Streamable HTTP 是 MCP 推荐的生产环境传输协议，提供与负载均衡器和授权中间件的最佳兼容性，支持 HTTP2/H2C，并且具备内建 SSE 支持。
+
+## 核心配置
+
+### 1. 基础 Streamable HTTP 设置
+```python
+from mcp.server.fastmcp import FastMCP
+
+mcp = FastMCP(
+    name="ProductionServer",
+    stateless_http=True,  # 关键：启用无状态模式便于水平扩容
+)
+
+# 获取 FastAPI 应用实例
+app = mcp.streamable_http_app()
+
+# 生产环境运行
+if __name__ == "__main__":
+    mcp.run(
+        transport="streamable-http",
+        host="0.0.0.0",  # 监听所有接口
+        port=8000,
+        path="/mcp"      # 默认 MCP 端点路径
+    )
+```
+
+### 2. 安全配置
+```python
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
+
+# CORS 配置
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["https://yourdomain.com"],  # 生产环境限制来源
+    allow_credentials=True,
+    allow_methods=["GET", "POST"],
+    allow_headers=["*"],
+)
+
+# 可信主机配置
+app.add_middleware(
+    TrustedHostMiddleware, 
+    allowed_hosts=["yourdomain.com", "*.yourdomain.com"]
+)
+```
+
+## 生产环境架构模式
+
+### 1. 容器化部署
+```dockerfile
+# Dockerfile
+FROM python:3.13-slim
+
+WORKDIR /app
+
+# 安装依赖
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# 复制应用代码
+COPY server/ ./server/
+COPY config/ ./config/
+
+# 健康检查
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD curl -f http://localhost:8000/health || exit 1
+
+# 运行应用
+CMD ["python", "-m", "server.main"]
+```
+
+### 2. Kubernetes 部署配置
+```yaml
+# k8s/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp-server
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: mcp-server
+  template:
+    metadata:
+      labels:
+        app: mcp-server
+    spec:
+      containers:
+      - name: mcp-server
+        image: your-registry/mcp-server:latest
+        ports:
+        - containerPort: 8000
+        env:
+        - name: MCP_LOG_LEVEL
+          value: "INFO"
+        - name: MCP_CORS_ORIGINS
+          value: "https://yourdomain.com"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+```
+
+### 3. 负载均衡器配置
+```yaml
+# k8s/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-server-service
+spec:
+  selector:
+    app: mcp-server
+  ports:
+  - port: 80
+    targetPort: 8000
+  type: LoadBalancer
+
+---
+# k8s/ingress.yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: mcp-server-ingress
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
+spec:
+  tls:
+  - hosts:
+    - mcp.yourdomain.com
+    secretName: mcp-tls-secret
+  rules:
+  - host: mcp.yourdomain.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: mcp-server-service
+            port:
+              number: 80
+```
+
+## 监控和可观测性
+
+### 1. 健康检查端点
+```python
+from fastapi import FastAPI
+from fastapi.responses import JSONResponse
+
+@app.get("/health")
+async def health_check():
+    """基础健康检查"""
+    return JSONResponse({"status": "healthy", "timestamp": datetime.utcnow()})
+
+@app.get("/health/live")
+async def liveness_check():
+    """存活检查 - K8s liveness probe"""
+    return JSONResponse({"status": "alive"})
+
+@app.get("/health/ready")
+async def readiness_check():
+    """就绪检查 - K8s readiness probe"""
+    # 检查依赖服务（数据库、Redis 等）
+    dependencies_healthy = await check_dependencies()
+    
+    if dependencies_healthy:
+        return JSONResponse({"status": "ready"})
+    else:
+        return JSONResponse(
+            {"status": "not_ready", "reason": "dependencies_unhealthy"}, 
+            status_code=503
+        )
+```
+
+### 2. Prometheus 指标
+```python
+from prometheus_client import Counter, Histogram, Gauge, start_http_server
+
+# 定义指标
+REQUEST_COUNT = Counter(
+    'mcp_requests_total', 
+    'Total MCP requests', 
+    ['method', 'endpoint', 'status']
+)
+
+REQUEST_DURATION = Histogram(
+    'mcp_request_duration_seconds',
+    'MCP request duration',
+    ['method', 'endpoint']
+)
+
+ACTIVE_CONNECTIONS = Gauge(
+    'mcp_active_connections',
+    'Number of active MCP connections'
+)
+
+# 中间件收集指标
+@app.middleware("http")
+async def metrics_middleware(request: Request, call_next):
+    start_time = time.time()
+    
+    response = await call_next(request)
+    
+    # 记录指标
+    REQUEST_COUNT.labels(
+        method=request.method,
+        endpoint=request.url.path,
+        status=response.status_code
+    ).inc()
+    
+    REQUEST_DURATION.labels(
+        method=request.method,
+        endpoint=request.url.path
+    ).observe(time.time() - start_time)
+    
+    return response
+
+# 启动 Prometheus 指标服务器
+start_http_server(9090)
+```
+
+### 3. 结构化日志
+```python
+import structlog
+
+# 配置结构化日志
+structlog.configure(
+    processors=[
+        structlog.stdlib.filter_by_level,
+        structlog.stdlib.add_logger_name,
+        structlog.stdlib.add_log_level,
+        structlog.stdlib.PositionalArgumentsFormatter(),
+        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.processors.StackInfoRenderer(),
+        structlog.processors.format_exc_info,
+        structlog.processors.UnicodeDecoder(),
+        structlog.processors.JSONRenderer()
+    ],
+    context_class=dict,
+    logger_factory=structlog.stdlib.LoggerFactory(),
+    wrapper_class=structlog.stdlib.BoundLogger,
+    cache_logger_on_first_use=True,
+)
+
+logger = structlog.get_logger()
+
+# 在 MCP 组件中使用
+@mcp.tool()
+def example_tool(param: str) -> str:
+    logger.info("tool_execution_started", tool="example_tool", param=param)
+    
+    try:
+        result = process_param(param)
+        logger.info("tool_execution_completed", tool="example_tool", result=result)
+        return result
+    except Exception as e:
+        logger.error("tool_execution_failed", tool="example_tool", error=str(e))
+        raise
+```
+
+## 性能优化
+
+### 1. 连接池配置
+```python
+import asyncio
+from contextlib import asynccontextmanager
+
+# 全局连接池
+connection_pools = {}
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # 启动时初始化连接池
+    connection_pools["database"] = await create_db_pool()
+    connection_pools["redis"] = await create_redis_pool()
+    
+    yield
+    
+    # 关闭时清理连接池
+    await connection_pools["database"].close()
+    await connection_pools["redis"].close()
+
+app = FastAPI(lifespan=lifespan)
+```
+
+### 2. 缓存策略
+```python
+from functools import lru_cache
+import aioredis
+
+# 内存缓存
+@lru_cache(maxsize=1000)
+def expensive_computation(param: str) -> str:
+    # 计算密集型操作
+    return result
+
+# Redis 缓存装饰器
+def redis_cache(expire: int = 300):
+    def decorator(func):
+        async def wrapper(*args, **kwargs):
+            cache_key = f"{func.__name__}:{hash(str(args) + str(kwargs))}"
+            
+            # 尝试从缓存获取
+            cached = await redis_client.get(cache_key)
+            if cached:
+                return json.loads(cached)
+            
+            # 执行函数并缓存结果
+            result = await func(*args, **kwargs)
+            await redis_client.setex(cache_key, expire, json.dumps(result))
+            
+            return result
+        return wrapper
+    return decorator
+
+@mcp.tool()
+@redis_cache(expire=600)
+async def cached_tool(param: str) -> dict:
+    # 耗时操作
+    return await expensive_async_operation(param)
+```
+
+### 3. 并发控制
+```python
+import asyncio
+from asyncio import Semaphore
+
+# 限制并发数
+MAX_CONCURRENT = 10
+semaphore = Semaphore(MAX_CONCURRENT)
+
+@mcp.tool()
+async def rate_limited_tool(param: str) -> str:
+    async with semaphore:
+        # 限制并发执行的操作
+        return await process_with_rate_limit(param)
+```
+
+## 安全最佳实践
+
+### 1. 认证和授权
+```python
+from fastapi import HTTPException, Depends
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+
+security = HTTPBearer()
+
+async def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    """验证 JWT 令牌"""
+    token = credentials.credentials
+    
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=["HS256"])
+        return payload
+    except jwt.PyJWTError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+# 保护 MCP 端点
+@app.middleware("http")
+async def auth_middleware(request: Request, call_next):
+    if request.url.path.startswith("/mcp"):
+        # 验证认证
+        auth_header = request.headers.get("authorization")
+        if not auth_header:
+            return JSONResponse(
+                {"error": "Missing authorization header"}, 
+                status_code=401
+            )
+    
+    return await call_next(request)
+```
+
+### 2. 输入验证
+```python
+from pydantic import BaseModel, validator
+
+class ToolInput(BaseModel):
+    param: str
+    
+    @validator('param')
+    def validate_param(cls, v):
+        if len(v) > 1000:
+            raise ValueError('Parameter too long')
+        
+        # 防止注入攻击
+        if any(char in v for char in ['<', '>', '&', '"', "'"]):
+            raise ValueError('Invalid characters in parameter')
+        
+        return v
+
+@mcp.tool()
+async def secure_tool(input_data: ToolInput) -> str:
+    # 使用验证过的输入
+    return process_secure_input(input_data.param)
+```
+
+### 3. 速率限制
+```python
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
+
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+@app.post("/mcp")
+@limiter.limit("100/minute")
+async def mcp_endpoint(request: Request):
+    # MCP 协议处理
+    pass
+```
+
+## 故障排除和调试
+
+### 1. 调试模式配置
+```python
+import os
+
+DEBUG = os.getenv("DEBUG", "false").lower() == "true"
+
+if DEBUG:
+    # 开发环境配置
+    app.debug = True
+    logging.basicConfig(level=logging.DEBUG)
+else:
+    # 生产环境配置
+    logging.basicConfig(level=logging.INFO)
+```
+
+### 2. 错误处理
+```python
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    logger.error(
+        "unhandled_exception",
+        path=request.url.path,
+        method=request.method,
+        error=str(exc),
+        exc_info=True
+    )
+    
+    return JSONResponse(
+        status_code=500,
+        content={"error": "Internal server error", "request_id": str(uuid.uuid4())}
+    )
+
+@mcp.tool()
+async def error_prone_tool(param: str) -> str:
+    try:
+        return await risky_operation(param)
+    except SpecificError as e:
+        logger.warning("expected_error", tool="error_prone_tool", error=str(e))
+        raise ValueError(f"Tool execution failed: {e}")
+    except Exception as e:
+        logger.error("unexpected_error", tool="error_prone_tool", error=str(e))
+        raise RuntimeError("Tool execution encountered an unexpected error")
+```
+
+## 部署检查清单
+
+### 生产环境部署前检查
+- [ ] 启用 `stateless_http=True`
+- [ ] 配置适当的 CORS 策略
+- [ ] 实现健康检查端点
+- [ ] 配置结构化日志
+- [ ] 设置 Prometheus 指标
+- [ ] 实现认证和授权
+- [ ] 配置 HTTPS/TLS
+- [ ] 设置速率限制
+- [ ] 实现输入验证
+- [ ] 配置监控告警
+- [ ] 测试故障恢复
+- [ ] 验证负载均衡配置
+- [ ] 检查资源限制
+- [ ] 验证备份策略
+
+### 性能调优检查
+- [ ] 优化连接池配置
+- [ ] 实现适当的缓存策略
+- [ ] 配置并发控制
+- [ ] 监控内存使用
+- [ ] 优化数据库查询
+- [ ] 检查网络延迟
+- [ ] 验证扩容策略
+
+这些配置和最佳实践确保您的 MCP 服务器能够在生产环境中稳定、安全、高效地运行。
